@@ -1,11 +1,16 @@
-Mobile Video Object Detection
+Looking Fast and Slow
 ========================================
 
 Code for the Paper
 
 **[Looking Fast and Slow: Memory-Guided Mobile Video Object Detection][1]**
-Mason Liu, Menglong Zhu, Marie White, Yinxiao Li, Dmitry Kalenichenko
+Mason Liu, Menglong Zhu, Marie White, Yinxiao Li, Dmitry Kalenichenko. (CVPR 2019)
 
-Implementation is in progress, all the instructions will be updated here once it is done.
+<p align="center">
+  <img src="Interleaved_Intro.png" width=640 height=360>
+</p>
 
-[1]: https://arxiv.org/abs/1903.10172
+
+The implimentation is in progress. I will update all the instructions once it is done.
+[1]: https://arxiv.org/pdf/1903.10172.pdf
+

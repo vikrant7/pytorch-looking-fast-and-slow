@@ -1,3 +1,17 @@
+#!/usr/bin/python3
+"""Script for training the basenet which is mobilenet with ssd. As in mobilenet, here we use depthwise seperable convolutions 
+for reducing the computation without affecting accuracy much. Basenet is trained on Imagenet VID 2015 dataset.
+Few global variables defined here are explained:
+Global Variables
+----------------
+args : dict
+	Has all the options for changing various variables of the model as well as hyper-parameters for training.
+dataset : ImagenetDataset (torch.utils.data.Dataset, For more info see datasets/vid_dataset.py)
+optimizer : optim.SGD
+scheduler : CosineAnnealingLR, MultiStepLR (torch.optim.lr_scheduler)
+config : mobilenetv1_ssd_config (See config/mobilenetv1_ssd_config.py for more info, where you can change input size and ssd priors)
+loss : MultiboxLoss (See network/multibox_loss.py for more info)
+"""
 import argparse
 import os
 import logging
@@ -8,7 +22,7 @@ import torch
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
 
-from utils.misc import str2bool, Timer, freeze_net_layers, store_labels
+from utils.misc import str2bool, Timer, store_labels
 from network.mvod_basenet import MobileVOD, SSD, MobileNetV1, MatchPrior
 from datasets.vid_dataset import ImagenetDataset
 from network.multibox_loss import MultiboxLoss
@@ -19,16 +33,11 @@ parser = argparse.ArgumentParser(
 	description='Mobile Video Object Detection (Bottleneck LSTM) Training With Pytorch')
 
 parser.add_argument('--datasets', help='Dataset directory path')
-parser.add_argument('--balance_data', action='store_true',
-					help="Balance training data by down-sampling more frequent labels.")
-
-parser.add_argument('--freeze_net', action='store_true',
-					help="Freeze all the layers except the prediction head.")
 parser.add_argument('--width_mult', default=1.0, type=float,
 					help='Width Multiplifier')
 
 # Params for SGD
-parser.add_argument('--lr', '--learning-rate', default=1e-3, type=float,
+parser.add_argument('--lr', '--learning-rate', default=0.003, type=float,
 					help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float,
 					help='Momentum value for optim')
@@ -39,7 +48,7 @@ parser.add_argument('--gamma', default=0.1, type=float,
 parser.add_argument('--base_net_lr', default=None, type=float,
 					help='initial learning rate for base net.')
 parser.add_argument('--ssd_lr', default=None, type=float,
-					help='initial learning rate for the layers not in base net and prediction heads.')
+					help='initial learning rate for the layers not in base net')
 
 
 # Params for loading pretrained basenet or checkpoints.
@@ -88,6 +97,16 @@ if args.use_cuda and torch.cuda.is_available():
 
 
 def train(loader, net, criterion, optimizer, device, debug_steps=100, epoch=-1):
+	""" Train model
+	Arguments:
+		net : object of MobileVOD class
+		loader : validation data loader object
+		criterion : Loss function to use
+		device : device on which computation is done
+		optimizer : optimizer to optimize model
+		debug_steps : number of steps after which model needs to debug
+		epoch : current epoch number
+	"""
 	net.train(True)
 	running_loss = 0.0
 	running_regression_loss = 0.0
@@ -125,6 +144,15 @@ def train(loader, net, criterion, optimizer, device, debug_steps=100, epoch=-1):
 
 
 def val(loader, net, criterion, device):
+	""" Validate model
+	Arguments:
+		net : object of MobileVOD class
+		loader : validation data loader object
+		criterion : Loss function to use
+		device : device on which computation is done
+	Returns:
+		loss, regression loss, classification loss
+	"""
 	net.eval()
 	running_loss = 0.0
 	running_regression_loss = 0.0
@@ -147,11 +175,15 @@ def val(loader, net, criterion, device):
 		running_classification_loss += classification_loss.item()
 	return running_loss / num, running_regression_loss / num, running_classification_loss / num
 
-def initialize_model(pred_enc, pred_dec, save_dir):
+def initialize_model(pred_enc, pred_dec):
+	""" Loads learned weights from pretrained checkpoint model
+	Arguments:
+		pred_enc : object of MobileNetV1
+		pred_dec : object of SSD
+	"""
 	if args.pretrained:
 		logging.info("Loading weights from pretrained netwok")
 		pretrained_net_dict = torch.load(args.pretrained)
-
 		model_dict = pred_enc.state_dict()
 		# 1. filter out unnecessary keys
 		pretrained_dict = {k: v for k, v in pretrained_net_dict.items() if k in model_dict}
@@ -204,7 +236,7 @@ if __name__ == '__main__':
 	pred_enc = MobileNetV1(num_classes=num_classes, alpha = args.width_mult)
 	pred_dec = SSD(num_classes=num_classes, alpha = args.width_mult, is_test=False)
 	if args.resume is None:
-		initialize_model(pred_enc, pred_dec, args.checkpoint_folder)
+		initialize_model(pred_enc, pred_dec)
 		net = MobileVOD(pred_enc, pred_dec)
 	else:
 		net = MobileVOD(pred_enc, pred_dec)
@@ -218,13 +250,6 @@ if __name__ == '__main__':
 
 	base_net_lr = args.base_net_lr if args.base_net_lr is not None else args.lr
 	ssd_lr = args.ssd_lr if args.ssd_lr is not None else args.lr
-	if args.freeze_net:
-		logging.info("Freeze net.")
-		for param in pred_enc.parameters():
-			param.requires_grad = False
-		for param in pred_dec.parameters():
-			param.requires_grad = False
-
 	net.to(DEVICE)
 
 	criterion = MultiboxLoss(config.priors, iou_threshold=0.5, neg_pos_ratio=3,
@@ -247,7 +272,9 @@ if __name__ == '__main__':
 		logging.fatal(f"Unsupported Scheduler: {args.scheduler}.")
 		parser.print_help(sys.stderr)
 		sys.exit(1)
-
+	output_path = os.path.join(args.checkpoint_folder, f"basenet")
+	if not os.path.exists(output_path):
+		os.makedirs(os.path.join(output_path))
 	logging.info(f"Start training from epoch {last_epoch + 1}.")
 	for epoch in range(last_epoch + 1, args.num_epochs):
 		scheduler.step()
@@ -262,6 +289,6 @@ if __name__ == '__main__':
 				f"Validation Regression Loss {val_regression_loss:.4f}, " +
 				f"Validation Classification Loss: {val_classification_loss:.4f}"
 			)
-			model_path = os.path.join(args.checkpoint_folder, f"Epoch-{epoch}-Loss-{val_loss}.pth")
+			model_path = os.path.join(output_path, f"WM-{args.width_mult}-Epoch-{epoch}-Loss-{val_loss}.pth")
 			torch.save(net.state_dict(), model_path)
 			logging.info(f"Saved model {model_path}")

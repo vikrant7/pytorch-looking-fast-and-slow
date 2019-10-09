@@ -1,3 +1,18 @@
+#!/usr/bin/python3
+"""Script for training the MobileVOD with 1 Bottleneck Bottleneck LSTM layers. As in mobilenet, here we use depthwise seperable convolutions 
+for reducing the computation without affecting accuracy much. Model is trained on Imagenet VID 2015 dataset.
+Here we unroll LSTM for 10 steps and gives 10 consecutive frames of video as input.
+Few global variables defined here are explained:
+Global Variables
+----------------
+args : dict
+	Has all the options for changing various variables of the model as well as hyper-parameters for training.
+dataset : VIDDataset (torch.utils.data.Dataset, For more info see datasets/vid_dataset.py)
+optimizer : optim.SGD
+scheduler : CosineAnnealingLR, MultiStepLR (torch.optim.lr_scheduler)
+config : mobilenetv1_ssd_config (See config/mobilenetv1_ssd_config.py for more info, where you can change input size and ssd priors)
+loss : MultiboxLoss (See network/multibox_loss.py for more info)
+"""
 import argparse
 import os
 import logging
@@ -8,9 +23,9 @@ import torch
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
 
-from utils.misc import str2bool, Timer, freeze_net_layers, store_labels
+from utils.misc import str2bool, Timer, store_labels
 from network.mvod_bottleneck_lstm1 import MobileVOD, SSD, MobileNetV1, MatchPrior
-from datasets.voc_dataset import VOCDataset
+from datasets.vid_dataset import VIDDataset
 from network.multibox_loss import MultiboxLoss
 from config import mobilenetv1_ssd_config
 from dataloaders.data_preprocessing import TrainAugmentation, TestTransform
@@ -18,18 +33,14 @@ from dataloaders.data_preprocessing import TrainAugmentation, TestTransform
 parser = argparse.ArgumentParser(
 	description='Mobile Video Object Detection (Bottleneck LSTM) Training With Pytorch')
 
-parser.add_argument('--datasets', nargs='+', help='Dataset directory path')
-parser.add_argument('--validation_dataset', help='Dataset directory path')
-parser.add_argument('--balance_data', action='store_true',
-					help="Balance training data by down-sampling more frequent labels.")
-
+parser.add_argument('--datasets', help='Dataset directory path')
 parser.add_argument('--freeze_net', action='store_true',
 					help="Freeze all the layers except the prediction head.")
 parser.add_argument('--width_mult', default=1.0, type=float,
 					help='Width Multiplifier')
 
 # Params for SGD
-parser.add_argument('--lr', '--learning-rate', default=1e-3, type=float,
+parser.add_argument('--lr', '--learning-rate', default=0.003, type=float,
 					help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float,
 					help='Momentum value for optim')
@@ -76,7 +87,7 @@ parser.add_argument('--sequence_length', default=10, type=int,
 parser.add_argument('--use_cuda', default=True, type=str2bool,
 					help='Use CUDA to train model')
 
-parser.add_argument('--checkpoint_folder', default='models/bottleneck_lstm1',
+parser.add_argument('--checkpoint_folder', default='models/',
 					help='Directory for saving checkpoint models')
 
 
@@ -91,32 +102,43 @@ if args.use_cuda and torch.cuda.is_available():
 
 
 def train(loader, net, criterion, optimizer, device, debug_steps=100, epoch=-1, sequence_length=10):
+	""" Train model
+	Arguments:
+		net : object of MobileVOD class
+		loader : validation data loader object
+		criterion : Loss function to use
+		device : device on which computation is done
+		optimizer : optimizer to optimize model
+		debug_steps : number of steps after which model needs to debug
+		sequence_length : unroll length of model
+		epoch : current epoch number
+	"""
 	net.train(True)
 	running_loss = 0.0
 	running_regression_loss = 0.0
 	running_classification_loss = 0.0
 	for i, data in enumerate(loader):
 		images, boxes, labels = data
-		images = images.to(device)
-		boxes = boxes.to(device)
-		labels = labels.to(device)
+		for image, box, label in zip(images, boxes, labels):
+			image = image.to(device)
+			box = box.to(device)
+			label = label.to(device)
 
-		optimizer.zero_grad()
-		confidence, locations = net(images)
-		regression_loss, classification_loss = criterion(confidence, locations, labels, boxes)  # TODO CHANGE BOXES
-		loss = regression_loss + classification_loss
-		loss.backward(retain_graph=True)
-		optimizer.step()
+			optimizer.zero_grad()
+			confidence, locations = net(image)
+			regression_loss, classification_loss = criterion(confidence, locations, label, box)  # TODO CHANGE BOXES
+			loss = regression_loss + classification_loss
+			loss.backward(retain_graph=True)
+			optimizer.step()
 
-		running_loss += loss.item()
-		running_regression_loss += regression_loss.item()
-		running_classification_loss += classification_loss.item()
-		if i%sequence_length == 0:
-			net.detach_hidden()
+			running_loss += loss.item()
+			running_regression_loss += regression_loss.item()
+			running_classification_loss += classification_loss.item()
+		net.detach_hidden()
 		if i and i % debug_steps == 0:
-			avg_loss = running_loss / debug_steps
-			avg_reg_loss = running_regression_loss / debug_steps
-			avg_clf_loss = running_classification_loss / debug_steps
+			avg_loss = running_loss / (debug_steps*sequence_length)
+			avg_reg_loss = running_regression_loss / (debug_steps*sequence_length)
+			avg_clf_loss = running_classification_loss / (debug_steps*sequence_length)
 			logging.info(
 				f"Epoch: {epoch}, Step: {i}, " +
 				f"Average Loss: {avg_loss:.4f}, " +
@@ -129,7 +151,16 @@ def train(loader, net, criterion, optimizer, device, debug_steps=100, epoch=-1, 
 	net.detach_hidden()
 
 
-def test(loader, net, criterion, device):
+def val(loader, net, criterion, device):
+	""" Validate model
+	Arguments:
+		net : object of MobileVOD class
+		loader : validation data loader object
+		criterion : Loss function to use
+		device : device on which computation is done
+	Returns:
+		loss, regression loss, classification loss
+	"""
 	net.eval()
 	running_loss = 0.0
 	running_regression_loss = 0.0
@@ -137,22 +168,29 @@ def test(loader, net, criterion, device):
 	num = 0
 	for _, data in enumerate(loader):
 		images, boxes, labels = data
-		images = images.to(device)
-		boxes = boxes.to(device)
-		labels = labels.to(device)
-		num += 1
+		for image, box, label in zip (images, boxes, labels):
+			image = image.to(device)
+			box = box.to(device)
+			label = label.to(device)
+			num += 1
 
-		with torch.no_grad():
-			confidence, locations = net(images)
-			regression_loss, classification_loss = criterion(confidence, locations, labels, boxes)
-			loss = regression_loss + classification_loss
+			with torch.no_grad():
+				confidence, locations = net(image)
+				regression_loss, classification_loss = criterion(confidence, locations, label, box)
+				loss = regression_loss + classification_loss
 
-		running_loss += loss.item()
-		running_regression_loss += regression_loss.item()
-		running_classification_loss += classification_loss.item()
+			running_loss += loss.item()
+			running_regression_loss += regression_loss.item()
+			running_classification_loss += classification_loss.item()
+		net.detach_hidden()
 	return running_loss / num, running_regression_loss / num, running_classification_loss / num
 
-def initialize_model(pred_enc, pred_dec, save_dir):
+def initialize_model(pred_enc, pred_dec):
+	""" Loads learned weights from pretrained checkpoint model
+	Arguments:
+		pred_enc : object of MobileNetV1
+		pred_dec : object of SSD
+	"""
 	if args.pretrained:
 		logging.info("Loading weights from pretrained netwok")
 		pretrained_net_dict = torch.load(args.pretrained)
@@ -185,23 +223,19 @@ if __name__ == '__main__':
 	test_transform = TestTransform(config.image_size, config.image_mean, config.image_std)
 
 	logging.info("Prepare training datasets.")
-	datasets = []
-	for dataset_path in args.datasets:
-		dataset = VOCDataset(dataset_path, transform=train_transform,
+	train_dataset = VIDDataset(args.datasets, transform=train_transform,
 								 target_transform=target_transform)
-		label_file = os.path.join("models/", "voc-model-labels.txt")
-		store_labels(label_file, dataset.class_names)
-		num_classes = len(dataset.class_names)
-	datasets.append(dataset)
+	label_file = os.path.join("models/", "vid-model-labels.txt")
+	store_labels(label_file, train_dataset._classes_names)
+	num_classes = len(train_dataset._classes_names)
 	logging.info(f"Stored labels into file {label_file}.")
-	train_dataset = ConcatDataset(datasets)
 	logging.info("Train dataset size: {}".format(len(train_dataset)))
 	train_loader = DataLoader(train_dataset, args.batch_size,
 							  num_workers=args.num_workers,
 							  shuffle=True)
 	logging.info("Prepare Validation datasets.")
-	val_dataset = VOCDataset(args.validation_dataset, transform=test_transform,
-								 target_transform=target_transform, is_test=True)
+	val_dataset = VIDDataset(args.datasets, transform=test_transform,
+								 target_transform=target_transform, is_val=True)
 	logging.info(val_dataset)
 	logging.info("validation dataset size: {}".format(len(val_dataset)))
 
@@ -211,9 +245,9 @@ if __name__ == '__main__':
 	#num_classes = 30
 	logging.info("Build network.")
 	pred_enc = MobileNetV1(num_classes=num_classes, alpha = args.width_mult)
-	pred_dec = SSD(num_classes=num_classes, alpha = args.width_mult, is_test=False)
+	pred_dec = SSD(num_classes=num_classes, batch_size = args.batch_size, alpha = args.width_mult, is_test=False)
 	if args.resume is None:
-		initialize_model(pred_enc, pred_dec, args.checkpoint_folder)
+		initialize_model(pred_enc, pred_dec)
 		net = MobileVOD(pred_enc, pred_dec)
 	else:
 		net = MobileVOD(pred_enc, pred_dec)
@@ -255,7 +289,9 @@ if __name__ == '__main__':
 		logging.fatal(f"Unsupported Scheduler: {args.scheduler}.")
 		parser.print_help(sys.stderr)
 		sys.exit(1)
-
+	output_path = os.path.join(args.checkpoint_folder, f"lstm1")
+	if not os.path.exists(output_path):
+		os.makedirs(os.path.join(output_path))
 	logging.info(f"Start training from epoch {last_epoch + 1}.")
 	for epoch in range(last_epoch + 1, args.num_epochs):
 		scheduler.step()
@@ -263,13 +299,13 @@ if __name__ == '__main__':
 			  device=DEVICE, debug_steps=args.debug_steps, epoch=epoch, sequence_length=args.sequence_length)
 		
 		if epoch % args.validation_epochs == 0 or epoch == args.num_epochs - 1:
-			val_loss, val_regression_loss, val_classification_loss = test(val_loader, net, criterion, DEVICE)
+			val_loss, val_regression_loss, val_classification_loss = val(val_loader, net, criterion, DEVICE)
 			logging.info(
 				f"Epoch: {epoch}, " +
 				f"Validation Loss: {val_loss:.4f}, " +
 				f"Validation Regression Loss {val_regression_loss:.4f}, " +
 				f"Validation Classification Loss: {val_classification_loss:.4f}"
 			)
-			model_path = os.path.join(args.checkpoint_folder, f"{args.net}-Epoch-{epoch}-Loss-{val_loss}.pth")
+			model_path = os.path.join(output_path, f"WM-{args.width_mult}-Epoch-{epoch}-Loss-{val_loss}.pth")
 			torch.save(net.state_dict(), model_path)
 			logging.info(f"Saved model {model_path}")

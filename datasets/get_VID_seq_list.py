@@ -1,5 +1,18 @@
-import os
+#!/usr/bin/python3
+"""Script for creating text file containing sequences of 10 frames of particular video. Here we neglect all the frames where 
+there is no object in it as it was done in the official implementation in tensorflow.
+Global Variables
+----------------
+dirs : containing list of all the training dataset folders
+dirs_val : containing path to val folder of dataset
+dirs_test : containing path to test folder of dataset
+"""
 import numpy as np
+import logging
+import pathlib
+import xml.etree.ElementTree as ET
+import cv2
+import os
 
 dirs = ['ILSVRC2015_VID_train_0000/',
 		'ILSVRC2015_VID_train_0001/',
@@ -18,11 +31,27 @@ for dir in dirs:
 		seq_path = os.path.join('/media/sine/space/vikrant/ILSVRC2015/Data/VID/train/',dir,seq)
 		relative_path = dir + seq
 		image_list = np.sort(os.listdir(seq_path))
-		for i in range(0,int(len(image_list)/10)):
-			if (i+1)*10 <= len(image_list):
-				line = relative_path +'/;'+image_list[10*i]+','+image_list[10*i+1]+','+image_list[10*i+2]+','+image_list[10*i+3]+','+image_list[10*i+4]+','+image_list[10*i+5]+','+image_list[10*i+6]+','+image_list[10*i+7]+','+image_list[10*i+8]+','+image_list[10*i+9]
-				file_write_obj.writelines(line)
+		images = []
+		for image in image_list:
+			image_id = image.split('.')[0]
+			anno_file = image_id + '.xml'
+			anno_path = os.path.join('/media/sine/space/vikrant/ILSVRC2015/Annotations/VID/train/',dir,seq,anno_file)
+			objects = ET.parse(anno_path).findall("object")
+			num_objs = len(objects)
+			if num_objs == 0:
+				continue
+			else:
+				images.append(image_id)
+			if len(images)==10:
+				seqs_list = relative_path+'/'+':'
+				for image_id in images:
+					seqs_list = seqs_list + image_id+','
+				seqs_list = seqs_list[:-1]
+				file_write_obj.writelines(seqs_list)
 				file_write_obj.write('\n')
+				images = []
+			else:
+				continue
 
 file_write_obj.close()
 file_write_obj = open('val_VID_seqs_list.txt','w')
@@ -31,11 +60,27 @@ for dir in dirs_val:
 	for seq in seqs:
 		seq_path = os.path.join(dir,seq)
 		image_list = np.sort(os.listdir(seq_path))
-		for i in range(0,int(len(image_list)/10)):
-			if (i+1)*10 <= len(image_list):
-				line = seq+'/;'+image_list[10*i]+','+image_list[10*i+1]+','+image_list[10*i+2]+','+image_list[10*i+3]+','+image_list[10*i+4]+','+image_list[10*i+5]+','+image_list[10*i+6]+','+image_list[10*i+7]+','+image_list[10*i+8]+','+image_list[10*i+9]
-				file_write_obj.writelines(line)
-				file_write_obj.write('\n')
+		for image in image_list:
+			image_id = image.split('.')[0]
+			anno_file = image_id + '.xml'
+			anno_path = os.path.join('/media/sine/space/vikrant/ILSVRC2015/Annotations/VID/val/',seq,anno_file)
+			objects = ET.parse(anno_path).findall("object")
+			num_objs = len(objects)
+			if num_objs == 0:
+				continue
+			else:
+				images.append(image_id)
+			if len(images)==10:
+				seqs_list = seq+'/'+':'
+				for image_id in images:
+					seqs_list = seqs_list + image_id+','
+				seqs_list = seqs_list[:-1]
+				file_write_obj.writelines(seqs_list)
+				file_write_obj.write('\n')					
+				images = []
+			else:
+				continue
+
 
 file_write_obj.close()
 file_write_obj = open('test_VID_seqs_list.txt','w')
